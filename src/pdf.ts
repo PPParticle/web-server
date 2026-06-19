@@ -31,7 +31,7 @@ export function buildPdfHandoff(url: string): PdfHandoff {
   const content = [
     `This URL is a PDF: ${url}`,
     ``,
-    `The web reader does not parse PDFs.`,
+    `This MCP server does not parse PDFs.`,
     `Recommended: download with curl and parse with Python (PyMuPDF/pdfplumber).`,
   ].join("\n");
   return { title: `PDF handoff: ${url}`, content };

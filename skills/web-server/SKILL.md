@@ -1,9 +1,9 @@
 ---
-name: web-reader
-description: Search and read web content via the web-reader MCP server. Use for web search, reading web pages, GitHub repos, arXiv papers, Stack Overflow Q&A, Reddit posts. Provides web_search + read_url tools.
+name: web-server
+description: Search and read web content via the web-server MCP server. Use for web search, reading web pages, GitHub repos, arXiv papers, Stack Overflow Q&A, Reddit posts. Provides web_search + read_url tools.
 ---
 
-# Web Reader MCP 使用指南
+# Web Server MCP 使用指南
 
 两个工具,组合使用:**搜索 → 读取**。
 

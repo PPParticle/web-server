@@ -1,7 +1,7 @@
 {
-    "name": "mcp-web-reader",
+    "name": "mcp-web-server",
     "version": "2.0.0",
-    "description": "Self-hosted MCP web reader — GitHub/arXiv dedicated channels, unified Readability extraction, Playwright fallback, SSRF-safe",
+    "description": "Self-hosted MCP web server — GitHub/arXiv dedicated channels, unified Readability extraction, Playwright fallback, SSRF-safe",
     "main": "dist/index.js",
     "type": "module",
     "scripts": {
@@ -14,7 +14,7 @@
     "keywords": [
         "mcp",
         "claude",
-        "web-reader",
+        "web-server",
         "readability",
         "github",
         "arxiv"

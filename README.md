@@ -1,4 +1,4 @@
-# MCP Web Reader
+# MCP Web Server
 
 一个自托管的 MCP (Model Context Protocol) 服务器，把网页内容读取并转换为 Markdown，供 Claude、Cursor 等 MCP 客户端使用。零第三方付费 API 依赖。
 
@@ -31,7 +31,7 @@ npx playwright install chromium   # 可选，用于 JS 渲染 / 反爬降级
 ```json
 {
   "mcpServers": {
-    "web-reader": {
+    "web-server": {
       "command": "node",
       "args": ["/absolute/path/to/web-server/dist/index.js"]
     }
@@ -46,7 +46,7 @@ npx playwright install chromium   # 可选，用于 JS 渲染 / 反爬降级
 | `GITHUB_TOKEN` | GitHub Personal Access Token。仅 issue 通道走 REST API（api.github.com），不设时限 60 次/小时、设置后 5000 次/小时；README 通道走 raw 不受影响。不设也能读公开仓库 |
 | `SEARXNG_URL` | 自托管 SearXNG 实例地址（如 `http://localhost:8080`），需开启 JSON 输出。全网搜的**首选后端** |
 | `TAVILY_API_KEY` | Tavily API key（[免费注册](https://tavily.com)，1000 次/月）。全网搜的**回退后端** —— SearXNG 失败时兜底。**受限网络(无法访问 Google/Bing)也能搜**,建议配上 |
-| `WEB_READER_CACHE_DIR` | 覆盖缓存目录（默认 `~/.cache/mcp-web-reader/`） |
+| `WEB_SERVER_CACHE_DIR` | 覆盖缓存目录（默认 `~/.cache/mcp-web-server/`） |
 
 **搜索后端（全网搜 `web_search` 默认 topic 所需）**：
 
@@ -61,12 +61,12 @@ npx playwright install chromium   # 可选，用于 JS 渲染 / 反爬降级
 
 ## 配套 Skill（可选，强烈推荐）
 
-仓库自带一个 `web-reader` skill（`skills/web-reader/SKILL.md`），教会 agent 如何用好这两个工具 —— 尤其**学术搜索的关键词 fan-out 策略**：DBLP 按标题精确匹配，多词 query（如 `kv offloading storage`）单发会返回 0，必须拆子集 / 换同义词 / 搜系统名并行再合并，否则召回严重偏低。
+仓库自带一个 `web-server` skill（`skills/web-server/SKILL.md`），教会 agent 如何用好这两个工具 —— 尤其**学术搜索的关键词 fan-out 策略**：DBLP 按标题精确匹配，多词 query（如 `kv offloading storage`）单发会返回 0，必须拆子集 / 换同义词 / 搜系统名并行再合并，否则召回严重偏低。
 
 安装到 Claude Code：
 
 ```bash
-cp -r skills/web-reader ~/.claude/skills/
+cp -r skills/web-server ~/.claude/skills/
 ```
 
 其它 MCP 客户端（Cursor 等）按各自 skill 加载机制放置即可。不装也能用工具，只是 agent 不会自动遵循 fan-out 策略，学术搜索召回会偏低。

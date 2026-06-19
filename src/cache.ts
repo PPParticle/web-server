@@ -101,8 +101,8 @@ export async function withCache(
 
 export function resolveCacheDir(): string {
   return (
-    process.env.WEB_READER_CACHE_DIR ??
-    path.join(os.homedir(), ".cache", "mcp-web-reader")
+    process.env.WEB_SERVER_CACHE_DIR ??
+    path.join(os.homedir(), ".cache", "mcp-web-server")
   );
 }
 

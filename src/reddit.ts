@@ -151,7 +151,7 @@ export async function fetchRedditPost(
   const res = await withRetry(() =>
     fetch(jsonUrl, {
       headers: {
-        "User-Agent": "mcp-web-reader/2.0 (https://github.com/PPParticle/web-reader)",
+        "User-Agent": "mcp-web-server/2.0 (https://github.com/PPParticle/web-server)",
         Accept: "application/json",
       },
     }).then((r) => {

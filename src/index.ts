@@ -66,12 +66,12 @@ const searchProvider: SearchProvider | null = (() => {
   return searxngProvider ?? tavilyProvider ?? null;
 })();
 
-// 文件系统结果缓存（L1）。可通过 WEB_READER_CACHE_DIR 覆盖目录。
+// 文件系统结果缓存（L1）。可通过 WEB_SERVER_CACHE_DIR 覆盖目录。
 const cacheStore = createFsCacheStore();
 
 // 创建服务器实例（高层 McpServer API：声明式注册工具 + zod 校验）
 const server = new McpServer({
-  name: "web-reader",
+  name: "web-server",
   version: "2.0.0",
 });
 
@@ -377,7 +377,7 @@ async function routeArxiv(url: string): Promise<FetchResult | null> {
   const pdf = matchArxivPdf(url);
   if (pdf) {
     const handoff = [
-      `This URL is a PDF (arXiv:${pdf.id}). The web reader does not parse PDFs.`,
+      `This URL is a PDF (arXiv:${pdf.id}). This MCP server does not parse PDFs.`,
       ``,
       `Recommended: download with curl and parse with Python (PyMuPDF/pdfplumber).`,
       `Abstract: https://arxiv.org/abs/${pdf.id}`,
@@ -609,7 +609,7 @@ server.tool(
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("MCP Web Reader v2.0 已启动（GitHub/arXiv 专用通道 + Readability + Playwright）");
+  console.error("MCP Web Server v2.0 已启动（GitHub/arXiv 专用通道 + Readability + Playwright）");
 }
 
 // 优雅关闭处理

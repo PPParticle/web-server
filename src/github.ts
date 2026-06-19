@@ -184,7 +184,7 @@ export interface FetchGithubIssueOptions {
 function githubApiHeaders(): Record<string, string> {
   const headers: Record<string, string> = {
     Accept: "application/vnd.github+json",
-    "User-Agent": "mcp-web-reader",
+    "User-Agent": "mcp-web-server",
   };
   const token = process.env.GITHUB_TOKEN;
   if (token) headers.Authorization = `Bearer ${token}`;
