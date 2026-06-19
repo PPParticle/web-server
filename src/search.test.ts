@@ -6,6 +6,9 @@ import {
   parseTavilyResponse,
   topicToDomains,
   resolveDomains,
+  parseDblpResponse,
+  parseSemanticScholarResponse,
+  mergeResults,
 } from "./search.js";
 
 describe("buildSearxngUrl", () => {
@@ -188,5 +191,131 @@ describe("buildSearxngUrl with topic", () => {
       topic: "general",
     });
     expect(url).not.toContain("site%3A");
+  });
+});
+
+const dblpFixture = JSON.stringify({
+  result: {
+    hits: {
+      "@total": "2",
+      hit: [
+        {
+          "@score": "3",
+          info: {
+            title: "KVSwap: Disk-aware KV Cache Offloading.",
+            authors: { author: [
+              { "@pid": "37/10844", text: "Huawei Zhang" },
+              { "@pid": "189/8618", text: "Chunwei Xia" },
+              { "@pid": "181/2834", text: "Zheng Wang" },
+            ] },
+            venue: "MobiSys",
+            year: "2026",
+            type: "Conference and Workshop Papers",
+            ee: "https://doi.org/10.1145/3745756.3809234",
+            url: "https://dblp.org/rec/conf/mobisys/ZhangXW26",
+          },
+        },
+        {
+          "@score": "3",
+          info: {
+            title: "Mooncake: A KVCache-centric Architecture.",
+            authors: { author: { "@pid": "326/5414", text: "Ruoyu Qin" } },
+            venue: "FAST",
+            year: "2025",
+            ee: "https://doi.org/10.48550/arXiv.2407.00079",
+            url: "https://dblp.org/rec/conf/fast/QinLHCRZ0ZX25",
+          },
+        },
+      ],
+    },
+  },
+});
+
+describe("parseDblpResponse", () => {
+  it("extracts title, url, and snippet (authors + venue + year)", () => {
+    const results = parseDblpResponse(dblpFixture);
+    expect(results).toHaveLength(2);
+
+    expect(results[0].title).toBe("KVSwap: Disk-aware KV Cache Offloading.");
+    expect(results[0].url).toBe("https://dblp.org/rec/conf/mobisys/ZhangXW26");
+    expect(results[0].snippet).toContain("Huawei Zhang");
+    expect(results[0].snippet).toContain("MobiSys");
+    expect(results[0].snippet).toContain("2026");
+    expect(results[0].snippet).toContain("DOI:");
+  });
+
+  it("handles single author (object, not array)", () => {
+    const results = parseDblpResponse(dblpFixture);
+    expect(results[1].snippet).toContain("Ruoyu Qin");
+    expect(results[1].snippet).toContain("FAST");
+    expect(results[1].snippet).toContain("2025");
+  });
+
+  it("returns [] on empty or invalid JSON", () => {
+    expect(parseDblpResponse("not json")).toEqual([]);
+    expect(parseDblpResponse(JSON.stringify({}))).toEqual([]);
+    expect(
+      parseDblpResponse(JSON.stringify({ result: { hits: { hit: [] } } }))
+    ).toEqual([]);
+  });
+});
+
+const s2Fixture = JSON.stringify({
+  data: [
+    {
+      title: "Mooncake: A KVCache-centric Disaggregated Architecture.",
+      abstract: "We present Mooncake, a KV-cache-centric disaggregated architecture.",
+      venue: "FAST",
+      year: 2025,
+      citationCount: 42,
+      externalIds: { DOI: "10.1145/1234" },
+      authors: [{ name: "Ruoyu Qin" }, { name: "Zheming Li" }],
+    },
+    {
+      title: "KVSwap: Disk-aware KV Cache Offloading.",
+      abstract: "KVSwap stores the full cache on disk.",
+      venue: "MobiSys",
+      year: 2026,
+      citationCount: 5,
+      openAccessPdf: { url: "https://arxiv.org/pdf/2511.11907" },
+      authors: [{ name: "Huawei Zhang" }],
+    },
+  ],
+});
+
+describe("parseSemanticScholarResponse", () => {
+  it("extracts title, abstract snippet, authors, venue, year, citations", () => {
+    const results = parseSemanticScholarResponse(s2Fixture);
+    expect(results).toHaveLength(2);
+
+    expect(results[0].title).toContain("Mooncake");
+    expect(results[0].snippet).toContain("KV-cache-centric disaggregated");
+    expect(results[0].snippet).toContain("FAST");
+    expect(results[0].url).toContain("doi.org");
+
+    expect(results[1].title).toContain("KVSwap");
+    expect(results[1].url).toBe("https://arxiv.org/pdf/2511.11907");
+  });
+
+  it("returns [] on empty or invalid JSON", () => {
+    expect(parseSemanticScholarResponse("not json")).toEqual([]);
+    expect(parseSemanticScholarResponse(JSON.stringify({}))).toEqual([]);
+  });
+});
+
+describe("mergeResults", () => {
+  it("merges two lists and dedupes by normalized URL", () => {
+    const a = [
+      { title: "A", url: "https://example.com/a" },
+      { title: "B", url: "https://example.com/b" },
+    ];
+    const b = [
+      { title: "A dup", url: "http://example.com/a/" },
+      { title: "C", url: "https://example.com/c" },
+    ];
+    const merged = mergeResults(a, b);
+    expect(merged).toHaveLength(3);
+    expect(merged[0].title).toBe("A");
+    expect(merged[2].title).toBe("C");
   });
 });

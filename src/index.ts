@@ -25,7 +25,7 @@ import { formatFetchResult } from "./format.js";
 import { withCache, createFsCacheStore } from "./cache.js";
 import { extractLinks } from "./links.js";
 import { BrowserPool } from "./browser-pool.js";
-import { createSearxngProvider, createTavilyProvider, type SearchProvider, type SearchOpts } from "./search.js";
+import { createSearxngProvider, createTavilyProvider, createDblpProvider, createSemanticScholarProvider, mergeResults, type SearchProvider, type SearchOpts } from "./search.js";
 import {
   matchStackOverflowQuestion,
   fetchStackOverflowQuestion,
@@ -33,12 +33,29 @@ import {
 import { matchRedditPost, fetchRedditPost } from "./reddit.js";
 
 // 搜索后端:SearXNG 优先,失败 → Tavily 后备;只有一方则用那方;都不配则报错。
+// academic topic 走 DBLP + Semantic Scholar(免费、CCF 全覆盖、搜摘要),不走 Tavily/SearXNG。
 const searxngProvider = process.env.SEARXNG_URL
   ? createSearxngProvider(process.env.SEARXNG_URL)
   : null;
 const tavilyProvider = process.env.TAVILY_API_KEY
   ? createTavilyProvider(process.env.TAVILY_API_KEY)
   : null;
+const dblpProvider = createDblpProvider();
+const s2Provider = createSemanticScholarProvider();
+
+// academic 搜索:DBLP(标题搜) + Semantic Scholar(摘要搜)合并去重
+const academicProvider: SearchProvider = {
+  search: async (query: string, opts?: SearchOpts) => {
+    const limit = opts?.num ?? 10;
+    const [dblp, s2] = await Promise.allSettled([
+      dblpProvider.search(query, { ...opts, num: limit }),
+      s2Provider.search(query, { ...opts, num: limit }),
+    ]);
+    const dblpResults = dblp.status === "fulfilled" ? dblp.value : [];
+    const s2Results = s2.status === "fulfilled" ? s2.value : [];
+    return mergeResults(dblpResults, s2Results).slice(0, limit);
+  },
+};
 const searchProvider: SearchProvider | null = (() => {
   if (searxngProvider && tavilyProvider) {
     return {
@@ -562,13 +579,15 @@ server.tool(
       .describe("SearXNG 分类,如 general / it / images"),
   },
   async ({ query, topic, domains, num, categories }) => {
-    if (!searchProvider) {
+    // academic topic → DBLP(免费、CCF 全覆盖),不走网页搜索
+    const provider = topic === "academic" ? academicProvider : searchProvider;
+    if (!provider) {
       throw new McpError(
         ErrorCode.InvalidParams,
-        "未配置搜索后端:设 TAVILY_API_KEY(用 Tavily,受限网络也能搜)或 SEARXNG_URL(自托管 SearXNG)环境变量。"
+        "未配置搜索后端:设 TAVILY_API_KEY 或 SEARXNG_URL。(topic=academic 无需配置,走 DBLP。)"
       );
     }
-    const results = await searchProvider.search(query, { num, categories, topic, domains });
+    const results = await provider.search(query, { num, categories, topic, domains });
     if (results.length === 0) {
       return {
         content: [

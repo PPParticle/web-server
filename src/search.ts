@@ -157,3 +157,185 @@ export function createTavilyProvider(apiKey: string): SearchProvider {
     },
   };
 }
+
+// ---- DBLP provider (academic paper search) ----
+
+/** Parse a DBLP search API JSON response into SearchResults. */
+export function parseDblpResponse(json: string): SearchResult[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    return [];
+  }
+  const hits = (
+    parsed as { result?: { hits?: { hit?: unknown[] } } }
+  )?.result?.hits?.hit;
+  if (!Array.isArray(hits)) return [];
+
+  const seen = new Set<string>();
+  const out: SearchResult[] = [];
+  for (const h of hits) {
+    const info = (h as { info?: Record<string, unknown> })?.info;
+    if (!info) continue;
+    const title = String(info.title ?? "");
+    const dblpUrl = String(info.url ?? "");
+    const ee = String(info.ee ?? "");
+    const url = dblpUrl || ee;
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+
+    // Build snippet: "Author1, Author2 · VENUE · YEAR"
+    const authorField = (info.authors as { author?: unknown })?.author;
+    let authorNames: string[] = [];
+    if (Array.isArray(authorField)) {
+      authorNames = authorField
+        .map((a) => (a as { text?: string })?.text ?? "")
+        .filter(Boolean);
+    } else if (authorField && typeof authorField === "object") {
+      const name = (authorField as { text?: string }).text;
+      if (name) authorNames = [name];
+    }
+    const venue = String(info.venue ?? "");
+    const year = String(info.year ?? "");
+    const parts: string[] = [];
+    if (authorNames.length)
+      parts.push(
+        authorNames.slice(0, 3).join(", ") +
+          (authorNames.length > 3 ? " et al." : "")
+      );
+    if (venue) parts.push(venue);
+    if (year) parts.push(year);
+    if (ee && ee !== url) parts.push(`DOI: ${ee}`);
+
+    out.push({
+      title,
+      url,
+      ...(parts.length ? { snippet: parts.join(" · ") } : {}),
+    });
+  }
+  return out;
+}
+
+/** Create a DBLP-backed SearchProvider (free, no key; CCF venue coverage). */
+export function createDblpProvider(): SearchProvider {
+  return {
+    search: async (query, opts) => {
+      const limit = opts?.num ?? 20;
+      const apiUrl = `https://dblp.org/search/publ/api?q=${encodeURIComponent(
+        query
+      )}&format=json&h=${limit}`;
+      const res = await withRetry(() =>
+        fetch(apiUrl, { headers: { Accept: "application/json" } }).then((r) => {
+          if (!r.ok) throw new Error(`DBLP search failed: ${r.status}`);
+          return r;
+        })
+      );
+      return parseDblpResponse(await res.text());
+    },
+  };
+}
+
+// ---- Semantic Scholar provider (abstract search + venue filter) ----
+
+const DEFAULT_VENUES =
+  "OSDI,SOSP,ASPLOS,ISCA,MICRO,SIGCOMM,NSDI,FAST,EuroSys,ATC,VLDB,SIGMOD,ICDE,NeurIPS,ICML,ICLR,AAAI,IJCAI,CoRR";
+
+/** Parse a Semantic Scholar API JSON response into SearchResults. */
+export function parseSemanticScholarResponse(json: string): SearchResult[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    return [];
+  }
+  const data = parsed as { data?: unknown[] };
+  const items = data?.data;
+  if (!Array.isArray(items)) return [];
+
+  const seen = new Set<string>();
+  const out: SearchResult[] = [];
+  for (const item of items) {
+    const p = item as {
+      title?: string;
+      abstract?: string;
+      url?: string;
+      openAccessPdf?: { url?: string };
+      externalIds?: { DOI?: string };
+      venue?: string;
+      year?: number;
+      citationCount?: number;
+      authors?: { name?: string }[];
+    };
+    const title = p.title ?? "";
+    const url =
+      p.openAccessPdf?.url ??
+      (p.externalIds?.DOI ? `https://doi.org/${p.externalIds.DOI}` : undefined) ??
+      p.url ??
+      "";
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+
+    const authorNames = (p.authors ?? [])
+      .map((a) => a.name ?? "")
+      .filter(Boolean);
+    const metaParts: string[] = [];
+    if (authorNames.length)
+      metaParts.push(
+        authorNames.slice(0, 3).join(", ") +
+          (authorNames.length > 3 ? " et al." : "")
+      );
+    if (p.venue) metaParts.push(p.venue);
+    if (p.year) metaParts.push(String(p.year));
+    if (p.citationCount !== undefined)
+      metaParts.push(`${p.citationCount} citations`);
+    const metaStr = metaParts.join(" · ");
+    const abstractStr = p.abstract
+      ? p.abstract.slice(0, 200) + (p.abstract.length > 200 ? "..." : "")
+      : "";
+
+    out.push({
+      title,
+      url,
+      snippet: [metaStr, abstractStr].filter(Boolean).join(" | "),
+    });
+  }
+  return out;
+}
+
+/** Create a Semantic Scholar-backed SearchProvider (abstract search + venue filter, free). */
+export function createSemanticScholarProvider(): SearchProvider {
+  return {
+    search: async (query, opts) => {
+      const limit = opts?.num ?? 10;
+      const fields =
+        "title,abstract,authors,venue,year,citationCount,externalIds,openAccessPdf,url";
+      const params = new URLSearchParams({
+        query,
+        fields,
+        limit: String(limit),
+      });
+      const apiUrl = `https://api.semanticscholar.org/graph/v1/paper/search?${params}`;
+      const res = await withRetry(() =>
+        fetch(apiUrl, { headers: { Accept: "application/json" } }).then((r) => {
+          if (!r.ok) throw new Error(`Semantic Scholar search failed: ${r.status}`);
+          return r;
+        })
+      );
+      return parseSemanticScholarResponse(await res.text());
+    },
+  };
+}
+
+/** Merge two result lists, deduplicating by normalized URL. */
+export function mergeResults(a: SearchResult[], b: SearchResult[]): SearchResult[] {
+  const seen = new Set<string>();
+  const out: SearchResult[] = [];
+  for (const r of [...a, ...b]) {
+    const key = r.url.replace(/^https?:\/\//, "").replace(/\/$/, "").toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(r);
+  }
+  return out;
+}
