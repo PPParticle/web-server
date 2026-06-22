@@ -6,6 +6,21 @@
 
 import { withRetry } from "./retry.js";
 
+/** Per-request timeout for search API calls. Configurable via env. */
+const SEARCH_TIMEOUT_MS = Number(process.env.WEB_SERVER_SEARCH_TIMEOUT_MS ?? 30_000);
+
+/**
+ * Fetch with abort: mirrors the pattern used in index.ts but extracted here
+ * so each provider shares the same timeout behavior.
+ */
+function fetchWithTimeout(url: string, init?: RequestInit): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), SEARCH_TIMEOUT_MS);
+  return fetch(url, { ...init, signal: controller.signal }).finally(() =>
+    clearTimeout(timeoutId)
+  );
+}
+
 export interface SearchResult {
   title: string;
   url: string;
@@ -18,9 +33,20 @@ export interface SearchOpts {
   pageno?: number;
   topic?: SearchTopic;
   domains?: string[];
+  recency?: Recency;
 }
 
 export type SearchTopic = "general" | "academic" | "technical" | "community";
+
+export type Recency = "day" | "week" | "month" | "year";
+
+/** Tavily uses a "days back" integer rather than a named range. */
+const RECENCY_TO_DAYS: Record<Recency, number> = {
+  day: 1,
+  week: 7,
+  month: 30,
+  year: 365,
+};
 
 const TOPIC_DOMAINS: Record<SearchTopic, string[]> = {
   general: [],
@@ -61,6 +87,7 @@ export function buildSearxngUrl(
   u.searchParams.set("format", "json");
   if (opts?.categories) u.searchParams.set("categories", opts.categories);
   if (opts?.pageno) u.searchParams.set("pageno", String(opts.pageno));
+  if (opts?.recency) u.searchParams.set("time_range", opts.recency);
   return u.toString();
 }
 
@@ -112,6 +139,7 @@ export function buildTavilyBody(
   const body: Record<string, unknown> = { query, max_results: opts?.num ?? 10 };
   const domains = resolveDomains(opts);
   if (domains?.length) body.include_domains = domains;
+  if (opts?.recency) body.days = RECENCY_TO_DAYS[opts.recency];
   return body;
 }
 
@@ -123,7 +151,7 @@ export function createSearxngProvider(baseUrl: string): SearchProvider {
     search: async (query, opts) => {
       const url = buildSearxngUrl(baseUrl, query, opts);
       const res = await withRetry(() =>
-        fetch(url, { headers: { Accept: "application/json" } }).then((r) => {
+        fetchWithTimeout(url, { headers: { Accept: "application/json" } }).then((r) => {
           if (!r.ok) throw new Error(`SearXNG search failed: ${r.status}`);
           return r;
         })
@@ -140,7 +168,7 @@ export function createTavilyProvider(apiKey: string): SearchProvider {
     search: async (query, opts) => {
       const body = buildTavilyBody(query, opts);
       const res = await withRetry(() =>
-        fetch("https://api.tavily.com/search", {
+        fetchWithTimeout("https://api.tavily.com/search", {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -226,7 +254,7 @@ export function createDblpProvider(): SearchProvider {
         query
       )}&format=json&h=${limit}`;
       const res = await withRetry(() =>
-        fetch(apiUrl, { headers: { Accept: "application/json" } }).then((r) => {
+        fetchWithTimeout(apiUrl, { headers: { Accept: "application/json" } }).then((r) => {
           if (!r.ok) throw new Error(`DBLP search failed: ${r.status}`);
           return r;
         })
@@ -317,7 +345,7 @@ export function createSemanticScholarProvider(): SearchProvider {
       });
       const apiUrl = `https://api.semanticscholar.org/graph/v1/paper/search?${params}`;
       const res = await withRetry(() =>
-        fetch(apiUrl, { headers: { Accept: "application/json" } }).then((r) => {
+        fetchWithTimeout(apiUrl, { headers: { Accept: "application/json" } }).then((r) => {
           if (!r.ok) throw new Error(`Semantic Scholar search failed: ${r.status}`);
           return r;
         })

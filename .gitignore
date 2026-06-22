@@ -1,10 +1,35 @@
+# Dependencies / build
 node_modules/
 dist/
-*.log
-.DS_Store
+
+# Local environment / editor
 .env
 .vscode/
 *.swp
 *.swo
+.DS_Store
+*.log
+
+# Claude Code (machine-local, not part of MCP server)
 .claude/
+
+# Tests / fixtures / eval / coverage — intentionally local only (plan §1, §9)
 *.test.ts
+*.test.tsx
+*.spec.ts
+fixtures/
+test-data/
+testdata/
+eval/
+evaluation/
+coverage/
+.nyc_output/
+.vitest/
+
+# CI test workflows — no test CI in public repo
+.github/workflows/test*.yml
+.github/workflows/*test*.yml
+
+# Internal planning / tooling (not part of MCP server deliverable)
+.codegraph/
+WEB_SERVER_QUALITY_IMPROVEMENT_PLAN.md

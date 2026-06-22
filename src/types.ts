@@ -15,5 +15,8 @@ export interface FetchResult {
     author?: string;
     siteName?: string;
     publishedTime?: string;
+    canonicalUrl?: string;
   };
+  /** Low-quality signals (login wall, empty title, short body). Not rendered in Markdown. */
+  warnings?: string[];
 }
