@@ -29,7 +29,23 @@ import { formatFetchResult, splitParagraphs } from "./format.js";
 import { withCache, createFsCacheStore } from "./cache.js";
 import { extractLinks } from "./links.js";
 import { BrowserPool } from "./browser-pool.js";
-import { createSearxngProvider, createTavilyProvider, createDblpProvider, createSemanticScholarProvider, mergeResults, type SearchProvider, type SearchOpts } from "./search.js";
+import {
+  cleanCommunityQuery,
+  createDblpProvider,
+  createExpandedSearchProvider,
+  createHackerNewsSearchProvider,
+  createOpenAlexProvider,
+  createRedditSearchProvider,
+  createSearxngProvider,
+  createSemanticScholarProvider,
+  createTavilyProvider,
+  mergeResults,
+  rankSearchCandidates,
+  type SearchOpts,
+  type SearchProvider,
+  type SearchResult,
+  type SearchTopic,
+} from "./search.js";
 import {
   matchStackOverflowQuestion,
   fetchStackOverflowQuestion,
@@ -46,18 +62,23 @@ const tavilyProvider = process.env.TAVILY_API_KEY
   : null;
 const dblpProvider = createDblpProvider();
 const s2Provider = createSemanticScholarProvider();
+const openAlexProvider = createOpenAlexProvider();
+const redditSearchProvider = createRedditSearchProvider();
+const hackerNewsSearchProvider = createHackerNewsSearchProvider();
 
 // academic 搜索:DBLP(标题搜) + Semantic Scholar(摘要搜)合并去重
 const academicProvider: SearchProvider = {
   search: async (query: string, opts?: SearchOpts) => {
     const limit = opts?.num ?? 10;
-    const [dblp, s2] = await Promise.allSettled([
+    const [dblp, s2, openAlex] = await Promise.allSettled([
       dblpProvider.search(query, { ...opts, num: limit }),
       s2Provider.search(query, { ...opts, num: limit }),
+      openAlexProvider.search(query, { ...opts, num: limit }),
     ]);
     const dblpResults = dblp.status === "fulfilled" ? dblp.value : [];
     const s2Results = s2.status === "fulfilled" ? s2.value : [];
-    return mergeResults(dblpResults, s2Results).slice(0, limit);
+    const openAlexResults = openAlex.status === "fulfilled" ? openAlex.value : [];
+    return mergeResults(mergeResults(dblpResults, s2Results), openAlexResults).slice(0, limit);
   },
 };
 const searchProvider: SearchProvider | null = (() => {
@@ -69,6 +90,68 @@ const searchProvider: SearchProvider | null = (() => {
   }
   return searxngProvider ?? tavilyProvider ?? null;
 })();
+const enhancedSearchProvider = searchProvider
+  ? createExpandedSearchProvider(searchProvider)
+  : null;
+const enhancedAcademicProvider = createExpandedSearchProvider(academicProvider);
+const communityProvider: SearchProvider = {
+  search: async (query: string, opts?: SearchOpts) => {
+    const limit = Math.max(20, opts?.num ?? 10);
+    const cleanedQuery = cleanCommunityQuery(query) || query;
+    const sources = [
+      ...(searchProvider
+        ? [{
+            name: "web",
+            provider: searchProvider,
+            queryVariant: "original" as const,
+            query,
+          }]
+        : []),
+      {
+        name: "reddit",
+        provider: redditSearchProvider,
+        queryVariant: "community-platform" as const,
+        query: cleanedQuery,
+      },
+      {
+        name: "hacker_news",
+        provider: hackerNewsSearchProvider,
+        queryVariant: "community-platform" as const,
+        query: cleanedQuery,
+      },
+    ];
+    const settled = await Promise.allSettled(
+      sources.map(async (source) => ({
+        source,
+        results: await source.provider.search(source.query, {
+          ...opts,
+          topic: "general",
+          num: limit,
+          disableItFallback: true,
+        }),
+      }))
+    );
+    const groups = settled.map((entry, index) => {
+      const source = sources[index];
+      return {
+        query: source.query,
+        variant: source.queryVariant,
+        results:
+          entry.status === "fulfilled"
+            ? entry.value.results.map((result) => ({
+                ...result,
+                provider: result.provider ?? source.name,
+              }))
+            : [],
+      };
+    });
+    return rankSearchCandidates(groups, {
+      query,
+      topic: "community",
+      num: opts?.num,
+    });
+  },
+};
 
 // 文件系统结果缓存（L1）。可通过 WEB_SERVER_CACHE_DIR 覆盖目录。
 const cacheStore = createFsCacheStore();
@@ -636,6 +719,7 @@ const webSearchInputSchema = {
 
 const webSearchOutputSchema: ZodRawShape = {
   query: z.string(),
+  topic: z.string(),
   backend: z.string(),
   recency: z.string().nullable(),
   recencyApplied: z.boolean(),
@@ -647,6 +731,20 @@ const webSearchOutputSchema: ZodRawShape = {
       url: z.string(),
       snippet: z.string().nullable(),
       source: z.string(),
+      sourceType: z.string().nullable(),
+      provider: z.string().nullable(),
+      engines: z.array(z.string()).nullable(),
+      score: z.number().nullable(),
+      positions: z.array(z.number()).nullable(),
+      matchedQuery: z.string().nullable(),
+      queryVariant: z.string().nullable(),
+      authorityScore: z.number().nullable(),
+      authors: z.array(z.string()).nullable(),
+      year: z.number().nullable(),
+      venue: z.string().nullable(),
+      citationCount: z.number().nullable(),
+      doi: z.string().nullable(),
+      pdfUrl: z.string().nullable(),
     })
   ),
 };
@@ -661,7 +759,12 @@ const webSearchHandler: ToolCallback<typeof webSearchInputSchema> = async ({
 }) => {
   // academic topic → DBLP(免费、CCF 全覆盖),不走网页搜索
   const isAcademic = topic === "academic";
-  const provider = isAcademic ? academicProvider : searchProvider;
+  const provider =
+    topic === "academic"
+      ? enhancedAcademicProvider
+      : topic === "community"
+        ? communityProvider
+        : enhancedSearchProvider;
   if (!provider) {
     throw new McpError(
       ErrorCode.InvalidParams,
@@ -692,6 +795,20 @@ const webSearchHandler: ToolCallback<typeof webSearchInputSchema> = async ({
     url: r.url,
     snippet: r.snippet ?? null,
     source: backend,
+    sourceType: r.sourceType ?? null,
+    provider: r.provider ?? null,
+    engines: r.engines ?? null,
+    score: r.score ?? null,
+    positions: r.positions ?? null,
+    matchedQuery: r.matchedQuery ?? null,
+    queryVariant: r.queryVariant ?? null,
+    authorityScore: r.authorityScore ?? null,
+    authors: r.authors ?? null,
+    year: r.year ?? null,
+    venue: r.venue ?? null,
+    citationCount: r.citationCount ?? null,
+    doi: r.doi ?? null,
+    pdfUrl: r.pdfUrl ?? null,
   }));
 
   let text: string;
@@ -714,6 +831,7 @@ const webSearchHandler: ToolCallback<typeof webSearchInputSchema> = async ({
     content: [{ type: "text" as const, text }],
     structuredContent: {
       query,
+      topic,
       backend,
       recency: recency ?? null,
       recencyApplied,
