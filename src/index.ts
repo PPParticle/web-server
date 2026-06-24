@@ -30,6 +30,7 @@ import { withCache, createFsCacheStore } from "./cache.js";
 import { extractLinks } from "./links.js";
 import { BrowserPool } from "./browser-pool.js";
 import {
+  buildCommunitySearchQueries,
   cleanCommunityQuery,
   createDblpProvider,
   createExpandedSearchProvider,
@@ -43,6 +44,7 @@ import {
   rankSearchCandidates,
   type SearchOpts,
   type SearchProvider,
+  type SearchQueryVariantKind,
   type SearchResult,
   type SearchTopic,
 } from "./search.js";
@@ -94,11 +96,25 @@ const enhancedSearchProvider = searchProvider
   ? createExpandedSearchProvider(searchProvider)
   : null;
 const enhancedAcademicProvider = createExpandedSearchProvider(academicProvider);
+type CommunitySource = {
+  name: string;
+  provider: SearchProvider;
+  queryVariant: SearchQueryVariantKind;
+  query: string;
+  redditSubreddit?: string;
+  redditSort?: SearchOpts["redditSort"];
+  redditTimeRange?: SearchOpts["redditTimeRange"];
+};
+
 const communityProvider: SearchProvider = {
   search: async (query: string, opts?: SearchOpts) => {
     const limit = Math.max(20, opts?.num ?? 10);
     const cleanedQuery = cleanCommunityQuery(query) || query;
-    const sources = [
+    const communityQueries = buildCommunitySearchQueries(query);
+    const hackerNewsQueries = communityQueries
+      .filter((variant) => !variant.redditSubreddit)
+      .slice(0, 3);
+    const sources: CommunitySource[] = [
       ...(searchProvider
         ? [{
             name: "web",
@@ -107,18 +123,23 @@ const communityProvider: SearchProvider = {
             query,
           }]
         : []),
-      {
-        name: "reddit",
+      ...communityQueries.map((variant) => ({
+        name: variant.redditSubreddit
+          ? `reddit:${variant.redditSubreddit}`
+          : "reddit",
         provider: redditSearchProvider,
-        queryVariant: "community-platform" as const,
-        query: cleanedQuery,
-      },
-      {
+        queryVariant: variant.variant,
+        query: variant.query,
+        redditSubreddit: variant.redditSubreddit,
+        redditSort: variant.redditSort,
+        redditTimeRange: variant.redditTimeRange,
+      })),
+      ...hackerNewsQueries.map((variant) => ({
         name: "hacker_news",
         provider: hackerNewsSearchProvider,
-        queryVariant: "community-platform" as const,
-        query: cleanedQuery,
-      },
+        queryVariant: variant.variant,
+        query: variant.query || cleanedQuery,
+      })),
     ];
     const settled = await Promise.allSettled(
       sources.map(async (source) => ({
@@ -128,6 +149,9 @@ const communityProvider: SearchProvider = {
           topic: "general",
           num: limit,
           disableItFallback: true,
+          redditSubreddit: source.redditSubreddit,
+          redditSort: source.redditSort,
+          redditTimeRange: source.redditTimeRange,
         }),
       }))
     );
@@ -733,6 +757,10 @@ const webSearchOutputSchema: ZodRawShape = {
       source: z.string(),
       sourceType: z.string().nullable(),
       provider: z.string().nullable(),
+      subreddit: z.string().nullable(),
+      redditScore: z.number().nullable(),
+      commentCount: z.number().nullable(),
+      publishedAt: z.string().nullable(),
       engines: z.array(z.string()).nullable(),
       score: z.number().nullable(),
       positions: z.array(z.number()).nullable(),
@@ -777,6 +805,8 @@ const webSearchHandler: ToolCallback<typeof webSearchInputSchema> = async ({
     topic,
     domains,
     recency,
+
+// 启动服务器
   });
   // academic 后端(DBLP/S2)不支持时间过滤;其他后端透传
   const recencyApplied = !!recency && !isAcademic;
@@ -797,6 +827,10 @@ const webSearchHandler: ToolCallback<typeof webSearchInputSchema> = async ({
     source: backend,
     sourceType: r.sourceType ?? null,
     provider: r.provider ?? null,
+    subreddit: r.subreddit ?? null,
+    redditScore: r.redditScore ?? null,
+    commentCount: r.commentCount ?? null,
+    publishedAt: r.publishedAt ?? null,
     engines: r.engines ?? null,
     score: r.score ?? null,
     positions: r.positions ?? null,

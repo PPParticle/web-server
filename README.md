@@ -107,6 +107,7 @@ npx playwright install --with-deps chromium
 |----------|---------|
 | `GITHUB_TOKEN` | GitHub Personal Access Token. Only the issue channel hits the REST API (api.github.com): without a token you're capped at 60 req/hour, with one at 5000/hour. The README channel uses raw and is unaffected. Public repos are readable without a token. |
 | `SEARXNG_URL` | URL of a self-hosted SearXNG instance (e.g. `http://localhost:8080`); must have JSON output enabled. The **preferred backend** for web search. |
+| `WEB_SERVER_PROXY_URL` | Optional HTTP proxy for direct external providers such as Reddit, e.g. `http://127.0.0.1:7888`. If unset, `HTTPS_PROXY` / `HTTP_PROXY` are also honored. |
 | `TAVILY_API_KEY` | Tavily API key ([free signup](https://tavily.com), 1000 req/month). The **fallback backend** — kicks in when SearXNG fails. Also works in restricted networks (no Google/Bing access), recommended to configure. |
 | `WEB_SERVER_CACHE_DIR` | Override the cache directory (default `~/.cache/mcp-web-server/`). |
 

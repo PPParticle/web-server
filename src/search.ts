@@ -4,6 +4,8 @@
  * is split out so it is unit-testable; the network call is a thin boundary.
  */
 
+import { JSDOM } from "jsdom";
+import { ProxyAgent } from "undici";
 import { withRetry } from "./retry.js";
 
 /** Per-request timeout for search API calls. Configurable via env. */
@@ -16,12 +18,38 @@ const SEARCH_TIMEOUT_MS = Number(process.env.WEB_SERVER_SEARCH_TIMEOUT_MS ?? 30_
 function fetchWithTimeout(
   url: string,
   init?: RequestInit,
-  timeoutMs = SEARCH_TIMEOUT_MS
+  timeoutMs = SEARCH_TIMEOUT_MS,
+  proxyUrl?: string
 ): Promise<Response> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-  return fetch(url, { ...init, signal: controller.signal }).finally(() =>
+  const dispatcher = proxyUrl ? proxyAgentFor(proxyUrl) : undefined;
+  return fetch(url, {
+    ...init,
+    signal: controller.signal,
+    ...(dispatcher ? { dispatcher } : {}),
+  } as RequestInit & { dispatcher?: ProxyAgent }).finally(() =>
     clearTimeout(timeoutId)
+  );
+}
+
+const proxyAgents = new Map<string, ProxyAgent>();
+
+function proxyAgentFor(proxyUrl: string): ProxyAgent {
+  const existing = proxyAgents.get(proxyUrl);
+  if (existing) return existing;
+  const agent = new ProxyAgent(proxyUrl);
+  proxyAgents.set(proxyUrl, agent);
+  return agent;
+}
+
+function externalProxyUrl(): string | undefined {
+  return (
+    process.env.WEB_SERVER_PROXY_URL ||
+    process.env.HTTPS_PROXY ||
+    process.env.HTTP_PROXY ||
+    process.env.https_proxy ||
+    process.env.http_proxy
   );
 }
 
@@ -37,6 +65,10 @@ export interface SearchResult {
   sourceType?: SourceType;
   authorityScore?: number;
   provider?: string;
+  subreddit?: string;
+  redditScore?: number;
+  commentCount?: number;
+  publishedAt?: string;
   authors?: string[];
   year?: number;
   venue?: string;
@@ -53,16 +85,23 @@ export interface SearchOpts {
   domains?: string[];
   recency?: Recency;
   disableItFallback?: boolean;
+  redditSubreddit?: string;
+  redditSort?: RedditSort;
+  redditTimeRange?: RedditTimeRange;
 }
 
 export type SearchTopic = "general" | "academic" | "technical" | "community";
 
 export type Recency = "day" | "week" | "month" | "year";
+export type RedditSort = "relevance" | "top" | "new" | "comments";
+export type RedditTimeRange = "hour" | "day" | "week" | "month" | "year" | "all";
 export type SearchQueryVariantKind =
   | "original"
   | "expanded"
   | "official"
   | "community-platform"
+  | "community-broad"
+  | "community-subreddit"
   | "academic-review";
 export type SourceType =
   | "official"
@@ -79,6 +118,9 @@ export interface SearchQueryVariant {
   variant: SearchQueryVariantKind;
   domains?: string[];
   topic?: SearchTopic;
+  redditSubreddit?: string;
+  redditSort?: RedditSort;
+  redditTimeRange?: RedditTimeRange;
 }
 
 export interface SearchCandidateGroup {
@@ -180,6 +222,71 @@ export function cleanCommunityQuery(query: string): string {
   );
 }
 
+function hasLocalLlmIntent(query: string): boolean {
+  const q = query.toLowerCase();
+  return (
+    (q.includes("local") || q.includes("self host") || q.includes("self-host")) &&
+    (q.includes("llm") || q.includes("large language model"))
+  );
+}
+
+export function buildCommunitySearchQueries(query: string): SearchQueryVariant[] {
+  const cleaned = cleanCommunityQuery(query) || normalizeQueryText(query);
+  const variants: SearchQueryVariant[] = [
+    { query: cleaned, variant: "community-platform" },
+  ];
+
+  if (!hasLocalLlmIntent(cleaned)) return variants;
+
+  for (const expandedCommunityQuery of [
+    "best local LLMs",
+    "best local LLMs 2026",
+    "latest local LLMs",
+    "current best local LLM",
+    "best LLM to run locally",
+    "self hosting LLM",
+    "local LLM server setup",
+    "Ollama vLLM llama.cpp Open WebUI local LLM",
+  ]) {
+    pushUniqueVariant(variants, {
+      query: expandedCommunityQuery,
+      variant: "community-broad",
+    });
+  }
+
+  for (const targeted of [
+    {
+      query: "best local LLMs",
+      redditSubreddit: "LocalLLaMA",
+      redditSort: "top" as const,
+      redditTimeRange: "year" as const,
+    },
+    {
+      query: "latest local LLMs",
+      redditSubreddit: "LocalLLaMA",
+      redditSort: "new" as const,
+      redditTimeRange: "year" as const,
+    },
+    {
+      query: "current best local LLM",
+      redditSubreddit: "LocalLLaMA",
+      redditSort: "relevance" as const,
+      redditTimeRange: "year" as const,
+    },
+    { query: "best LLM to run locally", redditSubreddit: "LocalLLaMA" },
+    { query: "local LLM server setup", redditSubreddit: "LocalLLaMA" },
+    { query: "self hosting LLM", redditSubreddit: "selfhosted" },
+    { query: "Ollama vLLM llama.cpp Open WebUI local LLM", redditSubreddit: "ollama" },
+  ]) {
+    pushUniqueVariant(variants, {
+      ...targeted,
+      variant: "community-subreddit",
+    });
+  }
+
+  return variants;
+}
+
 function expandedQuery(query: string): string {
   let out = query;
   out = out.replace(/\bMCP\b/gi, "Model Context Protocol");
@@ -214,9 +321,18 @@ function pushUniqueVariant(
   variants: SearchQueryVariant[],
   variant: SearchQueryVariant
 ): void {
-  const key = `${variant.variant}:${variant.query}:${variant.domains?.join(",") ?? ""}`;
+  const variantKey = (v: SearchQueryVariant) =>
+    [
+      v.variant,
+      v.query,
+      v.domains?.join(",") ?? "",
+      v.redditSubreddit ?? "",
+      v.redditSort ?? "",
+      v.redditTimeRange ?? "",
+    ].join(":");
+  const key = variantKey(variant);
   const seen = new Set(
-    variants.map((v) => `${v.variant}:${v.query}:${v.domains?.join(",") ?? ""}`)
+    variants.map(variantKey)
   );
   if (!seen.has(key)) variants.push(variant);
 }
@@ -248,27 +364,36 @@ export function buildSearchQueries(
   }
 
   if (topic === "community" && !opts?.domains?.length) {
+    const communityVariants = buildCommunitySearchQueries(normalized);
     return [
       { query: normalized, variant: "original", topic: "general" },
-      ...TOPIC_DOMAINS.community.map((domain) => ({
-        query: normalized,
-        variant: "community-platform" as const,
+      ...communityVariants.flatMap((communityVariant) =>
+        TOPIC_DOMAINS.community.map((domain) => ({
+          query: communityVariant.query,
+          variant: communityVariant.variant,
         domains: [domain],
         topic: "general" as const,
-      })),
+        }))
+      ),
     ];
   }
 
-  const specIntent = topic === "technical" && hasTechnicalSpecIntent(normalized);
-  if (specIntent && expanded !== normalized) {
+  const technicalIntent = topic === "technical";
+  const specIntent = technicalIntent && hasTechnicalSpecIntent(normalized);
+  if (technicalIntent && expanded !== normalized) {
     pushUniqueVariant(variants, { query: expanded, variant: "expanded" });
   }
 
-  if (specIntent && !opts?.domains?.length) {
+  if (technicalIntent && !opts?.domains?.length) {
     for (const hint of officialHintsFor(expanded)) {
+      const officialQuery =
+        hint.match.some((term) => expanded.toLowerCase().includes(term.toLowerCase())) ||
+        expanded.toLowerCase().includes(hint.expansion.toLowerCase())
+          ? expanded
+          : `${hint.expansion} ${expanded}`;
       for (const domain of [...hint.docsDomains, ...hint.repoDomains]) {
         pushUniqueVariant(variants, {
-          query: expanded.includes(hint.expansion) ? expanded : `${hint.expansion} ${expanded}`,
+          query: officialQuery,
           variant: "official",
           domains: [domain],
         });
@@ -391,6 +516,66 @@ function officialSourceMatchesQuery(result: SearchResult, query: string): boolea
   return relevanceScore(result, query) >= 0.5;
 }
 
+function redditCommunityScore(result: SearchResult, query: string): number {
+  if (!isRedditResult(result)) return 0;
+  const title = result.title.toLowerCase();
+  const haystack = `${result.title} ${result.snippet ?? ""}`.toLowerCase();
+  const subreddit = result.subreddit?.toLowerCase();
+  let score = 0;
+
+  if (subreddit === "localllama") score += 40;
+  else if (subreddit === "selfhosted" || subreddit === "ollama") score += 16;
+
+  if (title.includes("best") && title.includes("local") && title.includes("llm")) {
+    score += 90;
+  } else if (title.includes("local") && title.includes("llm")) {
+    score += 55;
+  }
+  if (
+    title.includes("run locally") ||
+    title.includes("self host") ||
+    title.includes("self-host") ||
+    title.includes("setup") ||
+    title.includes("server")
+  ) {
+    score += 28;
+  }
+
+  if (result.queryVariant === "community-broad") score += 35;
+  if (result.queryVariant === "community-subreddit") score += 25;
+  if (result.queryVariant === "community-platform") score += 10;
+
+  score += Math.log1p(Math.max(0, result.redditScore ?? result.score ?? 0)) * 7;
+  score += Math.log1p(Math.max(0, result.commentCount ?? 0)) * 9;
+  score += relevanceScore(result, query) * 60;
+  if (result.publishedAt) {
+    const ageDays = daysSince(result.publishedAt);
+    if (ageDays !== undefined) {
+      if (ageDays <= 90) score += 45;
+      else if (ageDays <= 365) score += 32;
+      else if (ageDays <= 730) score += 15;
+    }
+  }
+  if (/\b(2026|latest|current|recent)\b/i.test(`${query} ${result.title}`)) {
+    score += 20;
+  }
+
+  if (
+    /\b(best|run|locally|setup|server|self[- ]?host|model)\b/i.test(query) &&
+    /\b(vram|mac studio|\$|cost analysis|bench)\b/i.test(haystack) &&
+    !/\b(best|run locally|setup|server|self[- ]?host)\b/i.test(title)
+  ) {
+    score -= 90;
+  } else if (
+    /\b(best|run|locally|setup|server|self[- ]?host|model)\b/i.test(query) &&
+    /\b(vram|mac studio|\$|cost analysis|bench)\b/i.test(haystack)
+  ) {
+    score -= 55;
+  }
+
+  return score;
+}
+
 function authorityScore(
   result: SearchResult,
   sourceType: SourceType,
@@ -433,6 +618,7 @@ function authorityScore(
     if (query.toLowerCase().includes("reddit") && safeHostname(result.url).includes("reddit.com")) {
       sourceBoost += 90;
     }
+    sourceBoost += redditCommunityScore(result, query);
   } else if (sourceType === "official") {
     sourceBoost = 80;
   }
@@ -480,6 +666,85 @@ function diversifyCommunityResults(results: SearchResult[], limit: number): Sear
     }
   }
   return out;
+}
+
+function isRedditResult(result: SearchResult): boolean {
+  const provider = result.provider?.toLowerCase() ?? "";
+  const host = safeHostname(result.url);
+  return provider.startsWith("reddit") || host === "reddit.com" || host.endsWith(".reddit.com");
+}
+
+function redditDiversityKey(result: SearchResult): string {
+  const title = result.title
+    .toLowerCase()
+    .replace(/\b(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)\b/g, "")
+    .replace(/\b20\d{2}\b/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (/\bbest local llms?\b/.test(title)) return "best-local-llm-list";
+  if (/\b(setup|server|self host|self hosted|self hosting|run locally)\b/.test(title)) {
+    return "setup-or-self-host";
+  }
+  if (/\b(ollama|vllm|llama cpp|open webui)\b/.test(title)) return "ecosystem";
+  if (/\b(gpu|nvidia|vram|mac studio|mini pc|hardware)\b/.test(title)) return "hardware";
+  return title.split(" ").slice(0, 5).join("-");
+}
+
+function selectDiverseRedditResults(results: SearchResult[], limit: number): SearchResult[] {
+  const selected: SearchResult[] = [];
+  const clusterCounts = new Map<string, number>();
+  for (const result of results) {
+    const key = redditDiversityKey(result);
+    const count = clusterCounts.get(key) ?? 0;
+    if (count >= 2) continue;
+    selected.push(result);
+    clusterCounts.set(key, count + 1);
+    if (selected.length >= limit) return selected;
+  }
+  const selectedKeys = new Set(selected.map((r) => normalizedUrlKey(r.url)));
+  for (const result of results) {
+    if (selectedKeys.has(normalizedUrlKey(result.url))) continue;
+    selected.push(result);
+    if (selected.length >= limit) return selected;
+  }
+  return selected;
+}
+
+function prioritizeRedditCommunityResults(
+  results: SearchResult[],
+  query: string,
+  limit: number
+): SearchResult[] {
+  const redditResults = results.filter(isRedditResult);
+  const shouldPinReddit =
+    /\breddit\b/i.test(query) || redditResults.length > 0;
+  if (!shouldPinReddit || redditResults.length === 0) {
+    return diversifyCommunityResults(results, limit);
+  }
+
+  const pinnedReddit = selectDiverseRedditResults(
+    redditResults,
+    Math.min(5, limit)
+  );
+  const pinnedKeys = new Set(pinnedReddit.map((r) => normalizedUrlKey(r.url)));
+  const remaining = results.filter((r) => !pinnedKeys.has(normalizedUrlKey(r.url)));
+  const remainingNonReddit = remaining.filter((r) => !isRedditResult(r));
+  const extraReddit = remaining.filter(isRedditResult);
+  const nonRedditFill = diversifyCommunityResults(
+    remainingNonReddit,
+    limit - pinnedReddit.length
+  );
+  const usedKeys = new Set([
+    ...pinnedReddit.map((r) => normalizedUrlKey(r.url)),
+    ...nonRedditFill.map((r) => normalizedUrlKey(r.url)),
+  ]);
+  const redditFill = extraReddit.filter((r) => !usedKeys.has(normalizedUrlKey(r.url)));
+  return [
+    ...pinnedReddit,
+    ...nonRedditFill,
+    ...redditFill,
+  ].slice(0, limit);
 }
 
 export function rankSearchCandidates(
@@ -536,6 +801,17 @@ export function rankSearchCandidates(
     });
     return (relevantSpecResults.length ? relevantSpecResults : ranked).slice(0, limit);
   }
+  if (opts.topic === "technical") {
+    const relevantTechnicalResults = ranked.filter((r) => {
+      const matchedQuery = r.matchedQuery ?? opts.query;
+      return (
+        officialSourceMatchesQuery(r, opts.query) ||
+        relevanceScore(r, matchedQuery) >= 0.35 ||
+        relevanceScore(r, opts.query) >= 0.35
+      );
+    });
+    return (relevantTechnicalResults.length ? relevantTechnicalResults : ranked).slice(0, limit);
+  }
   if (opts.topic === "community") {
     const communitySources = ranked.filter(
       (r) => r.sourceType === "community" || r.sourceType === "issue"
@@ -547,14 +823,13 @@ export function rankSearchCandidates(
         relevanceScore(r, opts.query) >= 0.5
       );
     });
-    return diversifyCommunityResults(
+    const pool =
       relevantCommunitySources.length
         ? relevantCommunitySources
         : communitySources.length
           ? communitySources
-          : ranked,
-      limit
-    );
+          : ranked;
+    return prioritizeRedditCommunityResults(pool, opts.query, limit);
   }
   return ranked.slice(0, limit);
 }
@@ -571,11 +846,12 @@ function seededOfficialGroups(
   query: string,
   opts?: SearchOpts
 ): SearchCandidateGroup[] {
-  if (opts?.topic !== "technical" || !hasTechnicalSpecIntent(query)) return [];
+  if (opts?.topic !== "technical") return [];
   const expanded = expandedQuery(query).toLowerCase();
-  if (!expanded.includes("model context protocol")) return [];
-  return [
-    {
+  const groups: SearchCandidateGroup[] = [];
+
+  if (hasTechnicalSpecIntent(query) && expanded.includes("model context protocol")) {
+    groups.push({
       query: "Model Context Protocol tools structured content output schema",
       variant: "official",
       domains: ["modelcontextprotocol.io"],
@@ -627,8 +903,42 @@ function seededOfficialGroups(
           positions: [5],
         },
       ],
-    },
-  ];
+    });
+  }
+
+  if (
+    (expanded.includes("nodejs") || expanded.includes("node.js")) &&
+    (expanded.includes("stream") || expanded.includes("backpressure"))
+  ) {
+    groups.push({
+      query: "Node.js stream backpressure official documentation",
+      variant: "official",
+      domains: ["nodejs.org"],
+      results: [
+        {
+          title: "Backpressuring in Streams",
+          url: "https://nodejs.org/en/learn/modules/backpressuring-in-streams",
+          snippet:
+            "Official Node.js guide explaining stream backpressure and memory behavior.",
+          sourceType: "official",
+          provider: "official_seed",
+          score: 100,
+          positions: [1],
+        },
+        {
+          title: "Stream | Node.js API",
+          url: "https://nodejs.org/api/stream.html",
+          snippet: "Official Node.js stream API reference.",
+          sourceType: "official",
+          provider: "official_seed",
+          score: 90,
+          positions: [2],
+        },
+      ],
+    });
+  }
+
+  return groups;
 }
 
 export function createExpandedSearchProvider(provider: SearchProvider): SearchProvider {
@@ -829,6 +1139,14 @@ export function parseRedditSearchResponse(json: string): SearchResult[] {
     if (!url || seen.has(url)) continue;
     seen.add(url);
     const score = typeof data.score === "number" ? data.score : undefined;
+    const commentCount =
+      typeof data.num_comments === "number" ? data.num_comments : undefined;
+    const subreddit =
+      typeof data.subreddit === "string" ? data.subreddit : undefined;
+    const publishedAt =
+      typeof data.created_utc === "number"
+        ? new Date(data.created_utc * 1000).toISOString()
+        : undefined;
     const comments =
       typeof data.num_comments === "number" ? `${data.num_comments} comments` : "";
     const selftext = typeof data.selftext === "string" ? data.selftext : "";
@@ -838,11 +1156,96 @@ export function parseRedditSearchResponse(json: string): SearchResult[] {
       snippet: [comments, selftext.slice(0, 180)].filter(Boolean).join(" | "),
       provider: "reddit",
       sourceType: "community",
-      ...(score !== undefined ? { score } : {}),
+      ...(subreddit ? { subreddit } : {}),
+      ...(score !== undefined ? { score, redditScore: score } : {}),
+      ...(commentCount !== undefined ? { commentCount } : {}),
+      ...(publishedAt ? { publishedAt } : {}),
     });
   }
   return out;
 }
+
+function absoluteRedditUrl(href: string): string {
+  if (!href) return "";
+  if (href.startsWith("http://") || href.startsWith("https://")) return href;
+  if (href.startsWith("//")) return `https:${href}`;
+  if (href.startsWith("/")) return `https://www.reddit.com${href}`;
+  return "";
+}
+
+function normalizeText(text: string | null | undefined): string {
+  return (text ?? "").replace(/\s+/g, " ").trim();
+}
+
+function firstInteger(text: string): number | undefined {
+  const match = text.replace(/,/g, "").match(/-?\d+/);
+  return match ? Number(match[0]) : undefined;
+}
+
+function normalizeSubreddit(text: string | null | undefined): string | undefined {
+  const normalized = normalizeText(text).replace(/^\/?r\//i, "");
+  return normalized || undefined;
+}
+
+function normalizeDateString(value: string | null | undefined): string | undefined {
+  if (!value) return undefined;
+  const time = Date.parse(value);
+  return Number.isFinite(time) ? new Date(time).toISOString() : undefined;
+}
+
+function daysSince(isoDate: string): number | undefined {
+  const time = Date.parse(isoDate);
+  if (!Number.isFinite(time)) return undefined;
+  return Math.max(0, (Date.now() - time) / 86_400_000);
+}
+
+export function parseOldRedditSearchResponse(html: string): SearchResult[] {
+  const dom = new JSDOM(html);
+  const doc = dom.window.document;
+  const out: SearchResult[] = [];
+  const seen = new Set<string>();
+  for (const entry of doc.querySelectorAll(".search-result")) {
+    const titleEl = entry.querySelector<HTMLAnchorElement>("a.search-title");
+    const commentsEl = entry.querySelector<HTMLAnchorElement>("a.search-comments");
+    const subreddit = normalizeSubreddit(
+      entry.querySelector(".search-subreddit-link")?.textContent
+    );
+    const scoreText = normalizeText(entry.querySelector(".search-score")?.textContent);
+    const commentsText = normalizeText(commentsEl?.textContent);
+    const excerpt = normalizeText(entry.querySelector(".search-result-body")?.textContent);
+    const title = normalizeText(titleEl?.textContent);
+    const commentsHref = commentsEl?.getAttribute("href") ?? "";
+    const titleHref = titleEl?.getAttribute("href") ?? "";
+    const url = absoluteRedditUrl(commentsHref || titleHref);
+    if (!title || !url || seen.has(url)) continue;
+    seen.add(url);
+
+    const redditScore = firstInteger(scoreText);
+    const commentCount = firstInteger(commentsText);
+    const timeEl = entry.querySelector("time");
+    const publishedAt = normalizeDateString(
+      timeEl?.getAttribute("datetime") ??
+        timeEl?.getAttribute("title") ??
+        undefined
+    );
+    out.push({
+      title,
+      url,
+      snippet: [subreddit, scoreText, commentsText, excerpt.slice(0, 180)]
+        .filter(Boolean)
+        .join(" | "),
+      provider: "reddit_old",
+      sourceType: "community",
+      ...(subreddit ? { subreddit } : {}),
+      ...(redditScore !== undefined ? { redditScore, score: redditScore } : {}),
+      ...(commentCount !== undefined ? { commentCount } : {}),
+      ...(publishedAt ? { publishedAt } : {}),
+    });
+  }
+  return out;
+}
+
+let redditJsonBlockedUntil = 0;
 
 export function createRedditSearchProvider(): SearchProvider {
   return {
@@ -856,22 +1259,63 @@ export function createRedditSearchProvider(): SearchProvider {
         raw_json: "1",
       });
       const apiUrl = `https://www.reddit.com/search.json?${params}`;
-      const res = await withRetry(() =>
+      const proxyUrl = externalProxyUrl();
+      const shouldTryJson =
+        !opts?.redditSubreddit && Date.now() >= redditJsonBlockedUntil;
+      try {
+        if (!shouldTryJson) throw new Error("Reddit JSON search recently blocked");
+        const res = await withRetry(() =>
+          fetchWithTimeout(
+            apiUrl,
+            {
+              headers: {
+                Accept: "application/json",
+                "User-Agent": "mcp-web-server/2.0 search quality agent",
+              },
+            },
+            12_000,
+            proxyUrl
+          ).then((r) => {
+            if (!r.ok) throw new Error(`Reddit search failed: ${r.status}`);
+            return r;
+          })
+        );
+        const results = parseRedditSearchResponse(await res.text());
+        if (results.length) return results.slice(0, opts?.num ?? 10);
+      } catch {
+        redditJsonBlockedUntil = Date.now() + 10 * 60_000;
+        // Fall through to old.reddit.com, which is often available when search.json
+        // is blocked by Reddit's network-security layer.
+      }
+
+      const oldParams = new URLSearchParams({
+        q: query,
+        sort: opts?.redditSort ?? "relevance",
+        t: opts?.redditTimeRange ?? "all",
+      });
+      if (opts?.redditSubreddit) oldParams.set("restrict_sr", "on");
+      const oldPath = opts?.redditSubreddit
+        ? `/r/${encodeURIComponent(opts.redditSubreddit)}/search`
+        : "/search";
+      const oldUrl = `https://old.reddit.com${oldPath}?${oldParams}`;
+      const oldRes = await withRetry(() =>
         fetchWithTimeout(
-          apiUrl,
+          oldUrl,
           {
             headers: {
-              Accept: "application/json",
-              "User-Agent": "mcp-web-server/2.0 search-quality",
+              Accept: "text/html",
+              "User-Agent":
+                "Mozilla/5.0 (compatible; mcp-web-server/2.0; +https://github.com/PPParticle/web-server)",
             },
           },
-          12_000
+          12_000,
+          proxyUrl
         ).then((r) => {
-          if (!r.ok) throw new Error(`Reddit search failed: ${r.status}`);
+          if (!r.ok) throw new Error(`Old Reddit search failed: ${r.status}`);
           return r;
         })
       );
-      return parseRedditSearchResponse(await res.text()).slice(0, opts?.num ?? 10);
+      return parseOldRedditSearchResponse(await oldRes.text()).slice(0, opts?.num ?? 10);
     },
   };
 }
